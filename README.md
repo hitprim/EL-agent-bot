@@ -1,59 +1,55 @@
-# YMTech Bot
+# EL Agent Bot
 
 Telegram-бот для управления голосовыми агентами ElevenLabs.
-n8n + MySQL, запуск через docker-compose.
+Сделан на n8n + MySQL, всё крутится в docker.
 
 ## Что умеет
 
-- `/start` — показать список твоих агентов кнопками
-- `/add agent_xxx` — привязать агента к своему Telegram-аккаунту
-- Выбрав агента из списка можно изменить:
-  - системный промпт
-  - приветственное сообщение
-  - базу знаний
+- `/start` - показывает твоих агентов кнопками
+- `/add agent_xxx` - привязать агента к своему телеграмм-аккаунту
+- Выбрал агента → можно поменять промпт / приветствие / базу знаний
 
-Каждый юзер видит и редактирует только своих агентов.
+Каждый юзер видит только своих агентов.
 
 ## Запуск
 
-Нужны:
-- Docker + Docker Compose
-- Telegram Bot Token (через @BotFather)
-- ElevenLabs API key с правами ElevenAgents Write
-- HTTPS-туннель к localhost:5678 для вебхуков Telegram (ngrok или подобное)
+Нужно:
+- docker
+- бот в телеграме (через @BotFather получить токен)
+- ключ от ElevenLabs (с правами на agents)
+- какой-нибудь туннель к localhost для вебхуков (ngrok, localtunnel)
 
-```bash
+```
 cp .env.example .env
-# заполнить .env
+```
+
+Дальше в `.env` заполняешь токены, пароли, WEBHOOK_URL (это твой ngrok-адрес).
+
+```
 docker-compose up -d
 ```
 
-n8n откроется на http://localhost:5678. При первом запуске создаст админ-аккаунт.
+n8n поднимется на http://localhost:5678. При первом заходе попросит создать акк.
 
-Дальше:
+## Настройка n8n
 
-1. Settings → Credentials:
-   - **MySQL** (тип MySQL): host `mysql`, port `3306`, database `ymtech_bot`, user `bot_user`, пароль из `.env`
-   - **Telegram** (тип Telegram API): Bot Token из `.env`
-2. Workflows → Import from File → выбрать `n8n/workflows/main_bot.workflow.json`
-3. В импортированном воркфлоу привязать credentials к нодам (MySQL ко всем mysql-нодам, Telegram к Telegram Trigger)
-4. Активировать воркфлоу (toggle Active)
+1. Заходишь в Settings → Credentials, создаёшь два credential:
+   - MySQL: host `mysql`, порт `3306`, база `ymtech_bot`, юзер/пароль из `.env`
+   - Telegram: вставляешь токен бота
 
-## Структура
+2. Workflows → Import from File → выбираешь `n8n/workflows/main_bot.workflow.json`
 
-```
-ymtech-test/
-├── docker-compose.yml
-├── .env.example
-├── n8n/workflows/main_bot.workflow.json
-├── mysql/schema.sql       — структура БД (3 таблицы)
-└── mysql/seed.sql         — тестовые данные
-```
+3. В нодах указываешь созданные креды (MySQL у всех mysql-нод, Telegram у Telegram Trigger)
 
-## БД
+4. Включаешь Active сверху справа
 
-- `users` — Telegram-пользователи
-- `user_agents` — связка user → ElevenLabs agent
-- `user_sessions` — текущий state диалога для каждого юзера (idle / await_prompt / await_welcome / await_kb)
+## Файлы
 
-Перед каждым PATCH к ElevenLabs воркфлоу проверяет в `user_agents` что выбранный агент принадлежит юзеру.
+- `docker-compose.yml` - mysql + n8n
+- `mysql/schema.sql` - таблицы (users, user_agents, user_sessions)
+- `mysql/seed.sql` - можно положить тестовые данные
+- `n8n/workflows/main_bot.workflow.json` - сам воркфлоу
+
+## По безопасности
+
+Перед каждым изменением агента воркфлоу делает SELECT в user_agents и проверяет что выбранный агент действительно принадлежит этому юзеру. Если нет - бот шлёт "нет доступа" и не вызывает API.
