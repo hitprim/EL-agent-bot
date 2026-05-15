@@ -1,4 +1,4 @@
--- тестовые данные, подставь свой telegram_id и agent_id
+-- тестовые данные, подставить свои telegram_id и agent_id
 
 USE ymtech_bot;
 
