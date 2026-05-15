@@ -1,0 +1,893 @@
+﻿{
+  "name": "YMTech Bot - Main",
+  "nodes": [
+
+    {
+      "parameters": {
+        "updates": ["message", "callback_query"],
+        "additionalFields": {}
+      },
+      "id": "node-01",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 300],
+      "webhookId": "ymtech-bot-main-webhook",
+      "credentials": {
+        "telegramApi": { "id": "1", "name": "Telegram Bot" }
+      }
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// РџР°СЂСЃРёРј Telegram update + СЌРєСЂР°РЅРёСЂСѓРµРј СЃС‚СЂРѕРєРё РґР»СЏ SQL\nconst body = $input.first().json;\nconst escapeSql = (s) => String(s || '').replace(/'/g, \"''\");\n\nlet telegramId, chatId, username, firstName, text, callbackData, updateType;\n\nif (body.message) {\n  updateType = 'message';\n  telegramId = body.message.from.id;\n  chatId = body.message.chat.id;\n  username = escapeSql(body.message.from.username);\n  firstName = escapeSql(body.message.from.first_name);\n  text = body.message.text || '';\n  callbackData = null;\n} else if (body.callback_query) {\n  updateType = 'callback_query';\n  telegramId = body.callback_query.from.id;\n  chatId = body.callback_query.message.chat.id;\n  username = escapeSql(body.callback_query.from.username);\n  firstName = escapeSql(body.callback_query.from.first_name);\n  text = null;\n  callbackData = body.callback_query.data;\n} else {\n  return [];\n}\n\nreturn [{ json: { telegramId, chatId, username, firstName, text, callbackData, updateType } }];"
+      },
+      "id": "node-02",
+      "name": "Parse Update",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 300]
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT INTO users (telegram_id, chat_id, username, first_name)\nVALUES ({{ $json.telegramId }}, {{ $json.chatId }}, '{{ $json.username }}', '{{ $json.firstName }}')\nON DUPLICATE KEY UPDATE\n  chat_id = VALUES(chat_id),\n  username = VALUES(username),\n  first_name = VALUES(first_name)",
+        "options": {}
+      },
+      "id": "node-03",
+      "name": "Upsert User",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [440, 300],
+      "credentials": {
+        "mySql": { "id": "2", "name": "MySQL Bot DB" }
+      }
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT id FROM users WHERE telegram_id = {{ $('Parse Update').first().json.telegramId }}",
+        "options": {}
+      },
+      "id": "node-04",
+      "name": "Get User ID",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [660, 300],
+      "credentials": {
+        "mySql": { "id": "2", "name": "MySQL Bot DB" }
+      }
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT IGNORE INTO user_sessions (user_id, state) VALUES ({{ $json.id }}, 'idle')",
+        "options": {}
+      },
+      "id": "node-05",
+      "name": "Init Session",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [880, 300],
+      "credentials": {
+        "mySql": { "id": "2", "name": "MySQL Bot DB" }
+      }
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT state, selected_agent_id FROM user_sessions WHERE user_id = {{ $('Get User ID').first().json.id }}",
+        "options": {}
+      },
+      "id": "node-06",
+      "name": "Get Session",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [1100, 300],
+      "alwaysOutputData": true,
+      "credentials": {
+        "mySql": { "id": "2", "name": "MySQL Bot DB" }
+      }
+    },
+
+    {
+      "parameters": {
+        "jsCode": "const parsed = $('Parse Update').first().json;\nconst userRow = $('Get User ID').first().json;\nconst sessionRow = $('Get Session').first().json || {};\n\nconst userId = userRow.id;\nconst state = sessionRow.state || 'idle';\nconst selectedAgentId = sessionRow.selected_agent_id || null;\nconst { telegramId, chatId, username, firstName, text, callbackData, updateType } = parsed;\n\nlet route = 'fallback';\n\n// Cancel callback Рё /start СЂР°Р±РѕС‚Р°СЋС‚ РІСЃРµРіРґР°, РЅРµР·Р°РІРёСЃРёРјРѕ РѕС‚ state\nif (callbackData === 'cancel') {\n  route = 'cancel';\n} else if (text === '/start' || text === '/menu') {\n  route = 'start';\n} else if (state === 'idle') {\n  if (callbackData && callbackData.startsWith('select_agent:')) {\n    route = 'select_agent';\n  } else if (callbackData && callbackData.startsWith('edit_prompt:')) {\n    route = 'edit_prompt';\n  } else if (callbackData && callbackData.startsWith('edit_welcome:')) {\n    route = 'edit_welcome';\n  } else if (callbackData && callbackData.startsWith('edit_kb:')) {\n    route = 'edit_kb';\n  } else if (text && text.startsWith('/add ')) {\n    route = 'add_agent';\n  }\n} else if (state === 'await_prompt' && text) {\n  // Р’ await_ СЃРѕСЃС‚РѕСЏРЅРёСЏС… РїСЂРёРЅРёРјР°РµРј С‚РѕР»СЊРєРѕ С‚РµРєСЃС‚РѕРІС‹Рµ СЃРѕРѕР±С‰РµРЅРёСЏ\n  route = 'await_prompt';\n} else if (state === 'await_welcome' && text) {\n  route = 'await_welcome';\n} else if (state === 'await_kb' && text) {\n  route = 'await_kb';\n}\n\nreturn [{ json: { telegramId, chatId, username, firstName, text, callbackData, updateType, userId, state, selectedAgentId, route } }];"
+      },
+      "id": "node-07",
+      "name": "Determine Route",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, 300]
+    },
+
+    {
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "values": [
+            {
+              "conditions": { "combinator": "and", "conditions": [{ "leftValue": "={{ $json.route }}", "rightValue": "start", "operator": { "type": "string", "operation": "equals" } }] },
+              "renameOutput": true, "outputKey": "start"
+            },
+            {
+              "conditions": { "combinator": "and", "conditions": [{ "leftValue": "={{ $json.route }}", "rightValue": "select_agent", "operator": { "type": "string", "operation": "equals" } }] },
+              "renameOutput": true, "outputKey": "select_agent"
+            },
+            {
+              "conditions": { "combinator": "and", "conditions": [{ "leftValue": "={{ $json.route }}", "rightValue": "edit_prompt", "operator": { "type": "string", "operation": "equals" } }] },
+              "renameOutput": true, "outputKey": "edit_prompt"
+            },
+            {
+              "conditions": { "combinator": "and", "conditions": [{ "leftValue": "={{ $json.route }}", "rightValue": "edit_welcome", "operator": { "type": "string", "operation": "equals" } }] },
+              "renameOutput": true, "outputKey": "edit_welcome"
+            },
+            {
+              "conditions": { "combinator": "and", "conditions": [{ "leftValue": "={{ $json.route }}", "rightValue": "edit_kb", "operator": { "type": "string", "operation": "equals" } }] },
+              "renameOutput": true, "outputKey": "edit_kb"
+            },
+            {
+              "conditions": { "combinator": "and", "conditions": [{ "leftValue": "={{ $json.route }}", "rightValue": "await_prompt", "operator": { "type": "string", "operation": "equals" } }] },
+              "renameOutput": true, "outputKey": "await_prompt"
+            },
+            {
+              "conditions": { "combinator": "and", "conditions": [{ "leftValue": "={{ $json.route }}", "rightValue": "await_welcome", "operator": { "type": "string", "operation": "equals" } }] },
+              "renameOutput": true, "outputKey": "await_welcome"
+            },
+            {
+              "conditions": { "combinator": "and", "conditions": [{ "leftValue": "={{ $json.route }}", "rightValue": "await_kb", "operator": { "type": "string", "operation": "equals" } }] },
+              "renameOutput": true, "outputKey": "await_kb"
+            },
+            {
+              "conditions": { "combinator": "and", "conditions": [{ "leftValue": "={{ $json.route }}", "rightValue": "add_agent", "operator": { "type": "string", "operation": "equals" } }] },
+              "renameOutput": true, "outputKey": "add_agent"
+            },
+            {
+              "conditions": { "combinator": "and", "conditions": [{ "leftValue": "={{ $json.route }}", "rightValue": "cancel", "operator": { "type": "string", "operation": "equals" } }] },
+              "renameOutput": true, "outputKey": "cancel"
+            }
+          ]
+        },
+        "fallbackOutput": "extra",
+        "options": {}
+      },
+      "id": "node-08",
+      "name": "Route Switch",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [1540, 300]
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT elevenlabs_agent_id, agent_name FROM user_agents WHERE user_id = {{ $json.userId }} ORDER BY created_at ASC",
+        "options": {}
+      },
+      "id": "node-09",
+      "name": "Get User Agents",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [1760, -400],
+      "alwaysOutputData": true,
+      "credentials": {
+        "mySql": { "id": "2", "name": "MySQL Bot DB" }
+      }
+    },
+
+    {
+      "parameters": {
+        "jsCode": "const agents = $input.all();\nconst chatId = $('Determine Route').first().json.chatId;\n\nif (agents.length === 0 || !agents[0].json.elevenlabs_agent_id) {\n  return [{\n    json: {\n      chatId,\n      text: 'РЈ РІР°СЃ РЅРµС‚ РїРѕРґРєР»СЋС‡С‘РЅРЅС‹С… Р°РіРµРЅС‚РѕРІ.\\n\\nР”РѕР±Р°РІСЊС‚Рµ Р°РіРµРЅС‚Р° РєРѕРјР°РЅРґРѕР№:\\n/add {elevenlabs_agent_id}',\n      keyboard: null\n    }\n  }];\n}\n\nconst keyboard = agents.map(item => [{\n  text: item.json.agent_name,\n  callback_data: 'select_agent:' + item.json.elevenlabs_agent_id\n}]);\n\nreturn [{ json: { chatId, text: 'Р’Р°С€Рё РіРѕР»РѕСЃРѕРІС‹Рµ Р°РіРµРЅС‚С‹ - РІС‹Р±РµСЂРёС‚Рµ РґР»СЏ СѓРїСЂР°РІР»РµРЅРёСЏ:', keyboard } }];"
+      },
+      "id": "node-10",
+      "name": "Build Agent List",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1980, -400]
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{{ JSON.stringify({ chat_id: $json.chatId, text: $json.text, reply_markup: $json.keyboard ? { inline_keyboard: $json.keyboard } : undefined, parse_mode: 'HTML' }) }}",
+        "options": {}
+      },
+      "id": "node-11",
+      "name": "Send Agent List",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2200, -400]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "const { callbackData, chatId, userId, telegramId, username, firstName, text } = $json;\nconst agentId = callbackData.split(':')[1];\nreturn [{ json: { ...$json, agentId } }];"
+      },
+      "id": "node-12",
+      "name": "Extract Agent ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1760, -200]
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=UPDATE user_sessions SET selected_agent_id = '{{ $json.agentId }}', state = 'idle' WHERE user_id = {{ $json.userId }}",
+        "options": {}
+      },
+      "id": "node-13",
+      "name": "Save Selected Agent",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [1980, -200],
+      "credentials": {
+        "mySql": { "id": "2", "name": "MySQL Bot DB" }
+      }
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{{ JSON.stringify({ chat_id: $('Extract Agent ID').first().json.chatId, text: 'РђРіРµРЅС‚ РІС‹Р±СЂР°РЅ. Р§С‚Рѕ С…РѕС‚РёС‚Рµ РёР·РјРµРЅРёС‚СЊ?', reply_markup: { inline_keyboard: [ [{ text: 'вњЏпёЏ РР·РјРµРЅРёС‚СЊ РїСЂРѕРјРїС‚', callback_data: 'edit_prompt:' + $('Extract Agent ID').first().json.agentId }], [{ text: 'рџ‘‹ РР·РјРµРЅРёС‚СЊ РїСЂРёРІРµС‚СЃС‚РІРёРµ', callback_data: 'edit_welcome:' + $('Extract Agent ID').first().json.agentId }], [{ text: 'рџ“љ РћР±РЅРѕРІРёС‚СЊ Р±Р°Р·Сѓ Р·РЅР°РЅРёР№', callback_data: 'edit_kb:' + $('Extract Agent ID').first().json.agentId }], [{ text: 'В« РќР°Р·Р°Рґ Рє СЃРїРёСЃРєСѓ', callback_data: 'cancel' }] ] } }) }}",
+        "options": {}
+      },
+      "id": "node-14",
+      "name": "Send Agent Menu",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2200, -200]
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=UPDATE user_sessions SET state = 'await_prompt', selected_agent_id = '{{ $json.callbackData.split(':')[1] }}' WHERE user_id = {{ $json.userId }}",
+        "options": {}
+      },
+      "id": "node-15",
+      "name": "Set Await Prompt",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [1760, 0],
+      "credentials": {
+        "mySql": { "id": "2", "name": "MySQL Bot DB" }
+      }
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{{ JSON.stringify({ chat_id: $('Determine Route').first().json.chatId, text: 'Р’РІРµРґРёС‚Рµ РЅРѕРІС‹Р№ СЃРёСЃС‚РµРјРЅС‹Р№ РїСЂРѕРјРїС‚ РґР»СЏ Р°РіРµРЅС‚Р°:\\n\\n(СЃР»РµРґСѓСЋС‰РµРµ СЃРѕРѕР±С‰РµРЅРёРµ Р±СѓРґРµС‚ РїСЂРёРЅСЏС‚Рѕ РєР°Рє РїСЂРѕРјРїС‚)', reply_markup: { inline_keyboard: [[{ text: 'В« РћС‚РјРµРЅР°', callback_data: 'cancel' }]] } }) }}",
+        "options": {}
+      },
+      "id": "node-16",
+      "name": "Ask For Prompt",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1980, 0]
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=UPDATE user_sessions SET state = 'await_welcome', selected_agent_id = '{{ $json.callbackData.split(':')[1] }}' WHERE user_id = {{ $json.userId }}",
+        "options": {}
+      },
+      "id": "node-17",
+      "name": "Set Await Welcome",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [1760, 200],
+      "credentials": {
+        "mySql": { "id": "2", "name": "MySQL Bot DB" }
+      }
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{{ JSON.stringify({ chat_id: $('Determine Route').first().json.chatId, text: 'Р’РІРµРґРёС‚Рµ РЅРѕРІРѕРµ РїСЂРёРІРµС‚СЃС‚РІРµРЅРЅРѕРµ СЃРѕРѕР±С‰РµРЅРёРµ Р°РіРµРЅС‚Р°:\\n\\n(СЌС‚Рѕ РїРµСЂРІРѕРµ С‡С‚Рѕ СЃРєР°Р¶РµС‚ Р°РіРµРЅС‚ РїСЂРё РЅР°С‡Р°Р»Рµ СЂР°Р·РіРѕРІРѕСЂР°)', reply_markup: { inline_keyboard: [[{ text: 'В« РћС‚РјРµРЅР°', callback_data: 'cancel' }]] } }) }}",
+        "options": {}
+      },
+      "id": "node-18",
+      "name": "Ask For Welcome",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1980, 200]
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=UPDATE user_sessions SET state = 'await_kb', selected_agent_id = '{{ $json.callbackData.split(':')[1] }}' WHERE user_id = {{ $json.userId }}",
+        "options": {}
+      },
+      "id": "node-19",
+      "name": "Set Await KB",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [1760, 400],
+      "credentials": {
+        "mySql": { "id": "2", "name": "MySQL Bot DB" }
+      }
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{{ JSON.stringify({ chat_id: $('Determine Route').first().json.chatId, text: 'РћС‚РїСЂР°РІСЊС‚Рµ С‚РµРєСЃС‚ РґР»СЏ Р±Р°Р·С‹ Р·РЅР°РЅРёР№ Р°РіРµРЅС‚Р°:\\n\\n(Р°РіРµРЅС‚ Р±СѓРґРµС‚ РёСЃРїРѕР»СЊР·РѕРІР°С‚СЊ СЌС‚РѕС‚ С‚РµРєСЃС‚ РїСЂРё РѕС‚РІРµС‚Р°С… РЅР° РІРѕРїСЂРѕСЃС‹)', reply_markup: { inline_keyboard: [[{ text: 'В« РћС‚РјРµРЅР°', callback_data: 'cancel' }]] } }) }}",
+        "options": {}
+      },
+      "id": "node-20",
+      "name": "Ask For KB",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1980, 400]
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT COUNT(*) as cnt FROM user_agents WHERE user_id = {{ $json.userId }} AND elevenlabs_agent_id = '{{ $json.selectedAgentId }}'",
+        "options": {}
+      },
+      "id": "node-21",
+      "name": "Auth Check Prompt",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [1760, 620],
+      "alwaysOutputData": true,
+      "credentials": {
+        "mySql": { "id": "2", "name": "MySQL Bot DB" }
+      }
+    },
+
+    {
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [{ "leftValue": "={{ $json.cnt }}", "rightValue": 0, "operator": { "type": "number", "operation": "gt" } }]
+        },
+        "options": {}
+      },
+      "id": "node-22",
+      "name": "IF Auth Prompt",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1980, 620]
+    },
+
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.elevenlabs.io/v1/convai/agents/{{ $('Determine Route').first().json.selectedAgentId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [{ "name": "xi-api-key", "value": "={{ $env.ELEVENLABS_API_KEY }}" }]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{{ JSON.stringify({ conversation_config: { agent: { prompt: { prompt: $('Determine Route').first().json.text } } } }) }}",
+        "options": {}
+      },
+      "id": "node-23",
+      "name": "EL Update Prompt",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2200, 540]
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=UPDATE user_sessions SET state = 'idle', selected_agent_id = NULL WHERE user_id = {{ $('Determine Route').first().json.userId }}",
+        "options": {}
+      },
+      "id": "node-24",
+      "name": "Reset State Prompt",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [2420, 540],
+      "credentials": {
+        "mySql": { "id": "2", "name": "MySQL Bot DB" }
+      }
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{{ JSON.stringify({ chat_id: $('Determine Route').first().json.chatId, text: 'вњ… РџСЂРѕРјРїС‚ Р°РіРµРЅС‚Р° СѓСЃРїРµС€РЅРѕ РѕР±РЅРѕРІР»С‘РЅ.\\n\\nРћС‚РїСЂР°РІСЊС‚Рµ /start С‡С‚РѕР±С‹ РІРµСЂРЅСѓС‚СЊСЃСЏ РІ РјРµРЅСЋ.' }) }}",
+        "options": {}
+      },
+      "id": "node-25",
+      "name": "Confirm Prompt",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2640, 540]
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT COUNT(*) as cnt FROM user_agents WHERE user_id = {{ $json.userId }} AND elevenlabs_agent_id = '{{ $json.selectedAgentId }}'",
+        "options": {}
+      },
+      "id": "node-26",
+      "name": "Auth Check Welcome",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [1760, 820],
+      "alwaysOutputData": true,
+      "credentials": {
+        "mySql": { "id": "2", "name": "MySQL Bot DB" }
+      }
+    },
+
+    {
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [{ "leftValue": "={{ $json.cnt }}", "rightValue": 0, "operator": { "type": "number", "operation": "gt" } }]
+        },
+        "options": {}
+      },
+      "id": "node-27",
+      "name": "IF Auth Welcome",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1980, 820]
+    },
+
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.elevenlabs.io/v1/convai/agents/{{ $('Determine Route').first().json.selectedAgentId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [{ "name": "xi-api-key", "value": "={{ $env.ELEVENLABS_API_KEY }}" }]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{{ JSON.stringify({ conversation_config: { agent: { first_message: $('Determine Route').first().json.text } } }) }}",
+        "options": {}
+      },
+      "id": "node-28",
+      "name": "EL Update Welcome",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2200, 740]
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=UPDATE user_sessions SET state = 'idle', selected_agent_id = NULL WHERE user_id = {{ $('Determine Route').first().json.userId }}",
+        "options": {}
+      },
+      "id": "node-29",
+      "name": "Reset State Welcome",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [2420, 740],
+      "credentials": {
+        "mySql": { "id": "2", "name": "MySQL Bot DB" }
+      }
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{{ JSON.stringify({ chat_id: $('Determine Route').first().json.chatId, text: 'вњ… РџСЂРёРІРµС‚СЃС‚РІРµРЅРЅРѕРµ СЃРѕРѕР±С‰РµРЅРёРµ Р°РіРµРЅС‚Р° СѓСЃРїРµС€РЅРѕ РѕР±РЅРѕРІР»РµРЅРѕ.\\n\\nРћС‚РїСЂР°РІСЊС‚Рµ /start С‡С‚РѕР±С‹ РІРµСЂРЅСѓС‚СЊСЃСЏ РІ РјРµРЅСЋ.' }) }}",
+        "options": {}
+      },
+      "id": "node-30",
+      "name": "Confirm Welcome",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2640, 740]
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=SELECT COUNT(*) as cnt FROM user_agents WHERE user_id = {{ $json.userId }} AND elevenlabs_agent_id = '{{ $json.selectedAgentId }}'",
+        "options": {}
+      },
+      "id": "node-31",
+      "name": "Auth Check KB",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [1760, 1020],
+      "alwaysOutputData": true,
+      "credentials": {
+        "mySql": { "id": "2", "name": "MySQL Bot DB" }
+      }
+    },
+
+    {
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [{ "leftValue": "={{ $json.cnt }}", "rightValue": 0, "operator": { "type": "number", "operation": "gt" } }]
+        },
+        "options": {}
+      },
+      "id": "node-32",
+      "name": "IF Auth KB",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1980, 1020]
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.elevenlabs.io/v1/convai/knowledge-base/text",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [{ "name": "xi-api-key", "value": "={{ $env.ELEVENLABS_API_KEY }}" }]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{{ JSON.stringify({ text: $('Determine Route').first().json.text, name: 'KB via Telegram bot - ' + new Date().toISOString() }) }}",
+        "options": {}
+      },
+      "id": "node-33",
+      "name": "EL Create KB Doc",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2200, 940]
+    },
+
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.elevenlabs.io/v1/convai/agents/{{ $('Determine Route').first().json.selectedAgentId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [{ "name": "xi-api-key", "value": "={{ $env.ELEVENLABS_API_KEY }}" }]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{{ JSON.stringify({ conversation_config: { agent: { prompt: { knowledge_base: [{ id: $json.id, type: 'file', name: $json.name || 'KB doc' }] } } } }) }}",
+        "options": {}
+      },
+      "id": "node-34",
+      "name": "EL Patch Agent KB",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2420, 940]
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=UPDATE user_sessions SET state = 'idle', selected_agent_id = NULL WHERE user_id = {{ $('Determine Route').first().json.userId }}",
+        "options": {}
+      },
+      "id": "node-35",
+      "name": "Reset State KB",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [2640, 940],
+      "credentials": {
+        "mySql": { "id": "2", "name": "MySQL Bot DB" }
+      }
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{{ JSON.stringify({ chat_id: $('Determine Route').first().json.chatId, text: 'вњ… Р‘Р°Р·Р° Р·РЅР°РЅРёР№ Р°РіРµРЅС‚Р° СѓСЃРїРµС€РЅРѕ РѕР±РЅРѕРІР»РµРЅР°.\\n\\nРћС‚РїСЂР°РІСЊС‚Рµ /start С‡С‚РѕР±С‹ РІРµСЂРЅСѓС‚СЊСЃСЏ РІ РјРµРЅСЋ.' }) }}",
+        "options": {}
+      },
+      "id": "node-36",
+      "name": "Confirm KB",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2860, 940]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "const text = $json.text || '';\nconst parts = text.trim().split(' ');\nif (parts.length < 2 || !parts[1].startsWith('agent_')) {\n  return [{ json: { ...$json, agentId: null, parseError: 'Р¤РѕСЂРјР°С‚: /add agent_xxxxxx' } }];\n}\nconst agentId = parts[1].trim();\nreturn [{ json: { ...$json, agentId, parseError: null } }];"
+      },
+      "id": "node-37",
+      "name": "Parse Add Command",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1760, 1220]
+    },
+
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.elevenlabs.io/v1/convai/agents/{{ $json.agentId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [{ "name": "xi-api-key", "value": "={{ $env.ELEVENLABS_API_KEY }}" }]
+        },
+        "options": {
+          "response": { "response": { "responseFormat": "json", "fullResponse": false } }
+        }
+      },
+      "id": "node-38",
+      "name": "EL Verify Agent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1980, 1220],
+      "onError": "continueRegularOutput"
+    },
+
+    {
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [{ "leftValue": "={{ $json.agent_id }}", "rightValue": "", "operator": { "type": "string", "operation": "notEmpty" } }]
+        },
+        "options": {}
+      },
+      "id": "node-39",
+      "name": "IF Agent Valid",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [2200, 1220]
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=INSERT IGNORE INTO user_agents (user_id, elevenlabs_agent_id, agent_name)\nVALUES ({{ $('Determine Route').first().json.userId }}, '{{ $('Parse Add Command').first().json.agentId }}', '{{ String($json.name).replace(/'/g, \"''\") }}')",
+        "options": {}
+      },
+      "id": "node-40",
+      "name": "Insert User Agent",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [2420, 1140],
+      "credentials": {
+        "mySql": { "id": "2", "name": "MySQL Bot DB" }
+      }
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{{ JSON.stringify({ chat_id: $('Determine Route').first().json.chatId, text: 'вњ… РђРіРµРЅС‚ ' + $('EL Verify Agent').first().json.name + ' СѓСЃРїРµС€РЅРѕ РґРѕР±Р°РІР»РµРЅ!\\n\\nРћС‚РїСЂР°РІСЊС‚Рµ /start С‡С‚РѕР±С‹ СѓРїСЂР°РІР»СЏС‚СЊ Р°РіРµРЅС‚Р°РјРё.' }) }}",
+        "options": {}
+      },
+      "id": "node-41",
+      "name": "Confirm Agent Added",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2640, 1140]
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{{ JSON.stringify({ chat_id: $('Determine Route').first().json.chatId, text: 'вќЊ РђРіРµРЅС‚ РЅРµ РЅР°Р№РґРµРЅ. РџСЂРѕРІРµСЂСЊС‚Рµ РїСЂР°РІРёР»СЊРЅРѕСЃС‚СЊ ID.\\n\\nР¤РѕСЂРјР°С‚: /add agent_xxxxxxxxxxxxxx' }) }}",
+        "options": {}
+      },
+      "id": "node-42",
+      "name": "Agent Not Found",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2420, 1320]
+    },
+
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=UPDATE user_sessions SET state = 'idle', selected_agent_id = NULL WHERE user_id = {{ $json.userId }}",
+        "options": {}
+      },
+      "id": "node-43",
+      "name": "Reset State Cancel",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [1760, 1500],
+      "credentials": {
+        "mySql": { "id": "2", "name": "MySQL Bot DB" }
+      }
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{{ JSON.stringify({ chat_id: $('Determine Route').first().json.chatId, text: 'Р”РµР№СЃС‚РІРёРµ РѕС‚РјРµРЅРµРЅРѕ. РћС‚РїСЂР°РІСЊС‚Рµ /start С‡С‚РѕР±С‹ РІРµСЂРЅСѓС‚СЊСЃСЏ РІ РјРµРЅСЋ.' }) }}",
+        "options": {}
+      },
+      "id": "node-44",
+      "name": "Send Cancel",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1980, 1500]
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{{ JSON.stringify({ chat_id: $('Determine Route').first().json.chatId, text: 'Р”РѕСЃС‚СѓРїРЅС‹Рµ РєРѕРјР°РЅРґС‹:\\n\\n/start - СЃРїРёСЃРѕРє РІР°С€РёС… Р°РіРµРЅС‚РѕРІ\\n/add {agent_id} - РґРѕР±Р°РІРёС‚СЊ Р°РіРµРЅС‚Р° ElevenLabs\\n\\nРџСЂРёРјРµСЂ РґРѕР±Р°РІР»РµРЅРёСЏ:\\n/add agent_xxxxxxxxxxxxxx' }) }}",
+        "options": {}
+      },
+      "id": "node-45",
+      "name": "Send Help",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1760, 1700]
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{{ JSON.stringify({ chat_id: $('Determine Route').first().json.chatId, text: 'в›”пёЏ Р”РѕСЃС‚СѓРї Р·Р°РїСЂРµС‰С‘РЅ. Р­С‚РѕС‚ Р°РіРµРЅС‚ РІР°Рј РЅРµ РїСЂРёРЅР°РґР»РµР¶РёС‚.' }) }}",
+        "options": {}
+      },
+      "id": "node-46",
+      "name": "Send Auth Error",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2200, 700]
+    }
+
+  ],
+
+  "connections": {
+    "Telegram Trigger": {
+      "main": [[{ "node": "Parse Update", "type": "main", "index": 0 }]]
+    },
+    "Parse Update": {
+      "main": [[{ "node": "Upsert User", "type": "main", "index": 0 }]]
+    },
+    "Upsert User": {
+      "main": [[{ "node": "Get User ID", "type": "main", "index": 0 }]]
+    },
+    "Get User ID": {
+      "main": [[{ "node": "Init Session", "type": "main", "index": 0 }]]
+    },
+    "Init Session": {
+      "main": [[{ "node": "Get Session", "type": "main", "index": 0 }]]
+    },
+    "Get Session": {
+      "main": [[{ "node": "Determine Route", "type": "main", "index": 0 }]]
+    },
+    "Determine Route": {
+      "main": [[{ "node": "Route Switch", "type": "main", "index": 0 }]]
+    },
+    "Route Switch": {
+      "main": [
+        [{ "node": "Get User Agents",       "type": "main", "index": 0 }],
+        [{ "node": "Extract Agent ID",       "type": "main", "index": 0 }],
+        [{ "node": "Set Await Prompt",       "type": "main", "index": 0 }],
+        [{ "node": "Set Await Welcome",      "type": "main", "index": 0 }],
+        [{ "node": "Set Await KB",           "type": "main", "index": 0 }],
+        [{ "node": "Auth Check Prompt",      "type": "main", "index": 0 }],
+        [{ "node": "Auth Check Welcome",     "type": "main", "index": 0 }],
+        [{ "node": "Auth Check KB",          "type": "main", "index": 0 }],
+        [{ "node": "Parse Add Command",      "type": "main", "index": 0 }],
+        [{ "node": "Reset State Cancel",     "type": "main", "index": 0 }],
+        [{ "node": "Send Help",              "type": "main", "index": 0 }]
+      ]
+    },
+
+    "Get User Agents":    { "main": [[{ "node": "Build Agent List",    "type": "main", "index": 0 }]] },
+    "Build Agent List":   { "main": [[{ "node": "Send Agent List",     "type": "main", "index": 0 }]] },
+
+    "Extract Agent ID":   { "main": [[{ "node": "Save Selected Agent", "type": "main", "index": 0 }]] },
+    "Save Selected Agent":{ "main": [[{ "node": "Send Agent Menu",     "type": "main", "index": 0 }]] },
+
+    "Set Await Prompt":   { "main": [[{ "node": "Ask For Prompt",      "type": "main", "index": 0 }]] },
+    "Set Await Welcome":  { "main": [[{ "node": "Ask For Welcome",     "type": "main", "index": 0 }]] },
+    "Set Await KB":       { "main": [[{ "node": "Ask For KB",          "type": "main", "index": 0 }]] },
+
+    "Auth Check Prompt": {
+      "main": [[{ "node": "IF Auth Prompt", "type": "main", "index": 0 }]]
+    },
+    "IF Auth Prompt": {
+      "main": [
+        [{ "node": "EL Update Prompt",  "type": "main", "index": 0 }],
+        [{ "node": "Send Auth Error",   "type": "main", "index": 0 }]
+      ]
+    },
+    "EL Update Prompt":   { "main": [[{ "node": "Reset State Prompt",  "type": "main", "index": 0 }]] },
+    "Reset State Prompt": { "main": [[{ "node": "Confirm Prompt",      "type": "main", "index": 0 }]] },
+
+    "Auth Check Welcome": {
+      "main": [[{ "node": "IF Auth Welcome", "type": "main", "index": 0 }]]
+    },
+    "IF Auth Welcome": {
+      "main": [
+        [{ "node": "EL Update Welcome",  "type": "main", "index": 0 }],
+        [{ "node": "Send Auth Error",    "type": "main", "index": 0 }]
+      ]
+    },
+    "EL Update Welcome":   { "main": [[{ "node": "Reset State Welcome", "type": "main", "index": 0 }]] },
+    "Reset State Welcome": { "main": [[{ "node": "Confirm Welcome",     "type": "main", "index": 0 }]] },
+
+    "Auth Check KB": {
+      "main": [[{ "node": "IF Auth KB", "type": "main", "index": 0 }]]
+    },
+    "IF Auth KB": {
+      "main": [
+        [{ "node": "EL Create KB Doc",  "type": "main", "index": 0 }],
+        [{ "node": "Send Auth Error",   "type": "main", "index": 0 }]
+      ]
+    },
+    "EL Create KB Doc":  { "main": [[{ "node": "EL Patch Agent KB", "type": "main", "index": 0 }]] },
+    "EL Patch Agent KB": { "main": [[{ "node": "Reset State KB",    "type": "main", "index": 0 }]] },
+    "Reset State KB":    { "main": [[{ "node": "Confirm KB",        "type": "main", "index": 0 }]] },
+
+    "Parse Add Command": { "main": [[{ "node": "EL Verify Agent",   "type": "main", "index": 0 }]] },
+    "EL Verify Agent": {
+      "main": [[{ "node": "IF Agent Valid", "type": "main", "index": 0 }]]
+    },
+    "IF Agent Valid": {
+      "main": [
+        [{ "node": "Insert User Agent", "type": "main", "index": 0 }],
+        [{ "node": "Agent Not Found",   "type": "main", "index": 0 }]
+      ]
+    },
+    "Insert User Agent": { "main": [[{ "node": "Confirm Agent Added", "type": "main", "index": 0 }]] },
+
+    "Reset State Cancel": { "main": [[{ "node": "Send Cancel", "type": "main", "index": 0 }]] }
+  },
+
+  "pinData": {},
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "00000000-0000-0000-0000-000000000001",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "instanceId": "ymtech-bot-instance"
+  },
+  "id": "ymtech-main-workflow",
+  "tags": []
+}
+

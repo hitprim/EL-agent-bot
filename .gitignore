@@ -1,0 +1,10 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+
+# n8n runtime data
+n8n/.n8n/
+
+# MySQL data volume
+mysql/data/

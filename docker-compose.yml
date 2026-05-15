@@ -1,0 +1,66 @@
+services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    # Ограничение памяти - MySQL 8.0 по умолчанию прожорлив
+    mem_limit: 512m
+    command: >
+      --innodb-buffer-pool-size=128M
+      --performance-schema=OFF
+      --max-connections=50
+      --innodb-log-file-size=32M
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  n8n:
+    image: n8nio/n8n:latest
+    restart: unless-stopped
+    mem_limit: 512m
+    # Явные DNS-серверы (Cloudflare + Google) - на Windows Docker DNS бывает кривой
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      - N8N_HOST=${N8N_HOST}
+      - N8N_PORT=${N8N_PORT}
+      - N8N_PROTOCOL=${N8N_PROTOCOL}
+      - WEBHOOK_URL=${WEBHOOK_URL}
+      - N8N_ENCRYPTION_KEY=${MYSQL_ROOT_PASSWORD}
+      # Разрешить доступ к env-переменным из выражений в нодах
+      # По умолчанию n8n блокирует их в целях безопасности
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+      # Отключить task runners (в n8n 2.x они блокируют env даже с флагом выше)
+      - N8N_RUNNERS_ENABLED=false
+      # Credentials доступны как env-переменные внутри n8n nodes
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./n8n/workflows:/home/node/workflows
+    ports:
+      - "${N8N_PORT}:${N8N_PORT}"
+
+volumes:
+  mysql_data:
+  n8n_data:
