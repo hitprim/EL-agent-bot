@@ -2,7 +2,6 @@ services:
   mysql:
     image: mysql:8.0
     restart: unless-stopped
-    # Ограничение памяти - MySQL 8.0 по умолчанию прожорлив
     mem_limit: 512m
     command: >
       --innodb-buffer-pool-size=128M
@@ -29,7 +28,6 @@ services:
     image: n8nio/n8n:latest
     restart: unless-stopped
     mem_limit: 512m
-    # Явные DNS-серверы (Cloudflare + Google) - на Windows Docker DNS бывает кривой
     dns:
       - 1.1.1.1
       - 8.8.8.8
@@ -42,12 +40,8 @@ services:
       - N8N_PROTOCOL=${N8N_PROTOCOL}
       - WEBHOOK_URL=${WEBHOOK_URL}
       - N8N_ENCRYPTION_KEY=${MYSQL_ROOT_PASSWORD}
-      # Разрешить доступ к env-переменным из выражений в нодах
-      # По умолчанию n8n блокирует их в целях безопасности
       - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
-      # Отключить task runners (в n8n 2.x они блокируют env даже с флагом выше)
       - N8N_RUNNERS_ENABLED=false
-      # Credentials доступны как env-переменные внутри n8n nodes
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
       - MYSQL_HOST=mysql
